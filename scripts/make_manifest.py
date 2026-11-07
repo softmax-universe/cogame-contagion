@@ -18,7 +18,7 @@ import sys
 
 SLUG = "contagion"
 IMAGE = "{{CONTAGION_IMAGE}}"
-SOURCE_URL = "https://github.com/Metta-AI/cogame-contagion/tree/main"
+SOURCE_URL = "https://github.com/softmax-universe/cogame-contagion/tree/main"
 SEATS = 6
 
 DESCRIPTION = (
