@@ -227,13 +227,16 @@ proc scriptedActionFromView*(view: JsonNode, kind: ScriptKind): JsonNode =
 
 proc promptsFromView*(view: JsonNode, guidance: string, selection: PromptSelection): tuple[system, user: string] =
   result.system = selection.systemBriefing(view["region"].getStr())
+  let road = view["own"]["gates"][0]["to"]
+  var borders = newJObject()
+  borders[road.getStr()] = %1
+  let optionalActions = %*{"borders": borders, "aid": [{"to": road, "amount": 1}]}
   result.user = "Private governor observation:\n" & $view &
     "\nOperator guidance:\n" & guidance &
     "\nReply with JSON. Required: lockdown (0..4) and testing (0..3). " &
     "Example: {\"lockdown\":0,\"testing\":2}. " &
-    "Optional borders maps your road destinations to 0..2. Optional aid sends funds to other regions, e.g. " &
-    $(%*[{"to": view["own"]["gates"][0]["to"], "amount": 1}]) &
-    ". Optional say and notes are strings."
+    "Optional example: " & $optionalActions &
+    ". borders maps road names to levels 0..2. aid sends money to any other region. say and notes are optional strings."
 
 proc choosePromptAction*(client: LlmClient, view: JsonNode,
     guidance: string, slot: int, selection: PromptSelection): JsonNode =

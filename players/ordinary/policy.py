@@ -92,6 +92,8 @@ def parse_reply_json(text: str) -> dict:
 def prompts(view: dict, guidance: str, selection: dict) -> tuple[str, str]:
     variant = selected_variant(selection)
     system = (PROMPT_BANK["introductions"][variant] + PROMPT_BANK["rules"][variant]).format(region=view["region"])
+    road = view["own"]["gates"][0]["to"]
+    optional_actions = {"borders": {road: 1}, "aid": [{"to": road, "amount": 1}]}
     user = (
         "Private governor observation:\n"
         + json.dumps(view, ensure_ascii=False, separators=(",", ":"))
@@ -99,8 +101,8 @@ def prompts(view: dict, guidance: str, selection: dict) -> tuple[str, str]:
         + guidance
         + '\nReply with JSON. Required: lockdown (0..4) and testing (0..3). '
         'Example: {"lockdown":0,"testing":2}. '
-        'Optional borders maps your road destinations to 0..2. Optional aid sends funds to other regions, e.g. '
-        + json.dumps([{"to": view["own"]["gates"][0]["to"], "amount": 1}], ensure_ascii=False, separators=(",", ":"))
-        + ". Optional say and notes are strings."
+        'Optional example: '
+        + json.dumps(optional_actions, ensure_ascii=False, separators=(",", ":"))
+        + ". borders maps road names to levels 0..2. aid sends money to any other region. say and notes are optional strings."
     )
     return system, user
