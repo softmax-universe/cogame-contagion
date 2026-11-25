@@ -305,6 +305,7 @@ suite "reply parsing":
     let (system, user) = promptsFromView(view, "operator says hi", PromptSelection())
     check sim.regionOf(0) in system
     check "operator says hi" in user
+    check $(%*[{"to": view["own"]["gates"][0]["to"], "amount": 1}]) in user
     check "confirmed" in user
     check "infected" notin user
     for player in sim.config.players:
