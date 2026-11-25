@@ -103,6 +103,6 @@ def prompts(view: dict, guidance: str, selection: dict) -> tuple[str, str]:
         'Example: {"lockdown":0,"testing":2}. '
         'Optional example: '
         + json.dumps(optional_actions, ensure_ascii=False, separators=(",", ":"))
-        + ". borders maps road names to levels 0..2. aid sends money to any other region. say and notes are optional strings."
+        + ". borders maps road names to levels 0..2. aid sends money to other regions. The first three transfers use your available weekly budget. say and notes are optional strings."
     )
     return system, user

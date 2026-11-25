@@ -203,9 +203,6 @@ proc parseDecision*(sim: Sim, seat: int, payload: JsonNode): Decision =
   if not (aid.isNil or aid.kind == JNull):
     if aid.kind != JArray:
       raise newException(ContagionError, "aid must be a JSON array")
-    if aid.len > MaxAidEntries:
-      raise newException(ContagionError,
-        "aid may contain at most " & $MaxAidEntries & " entries")
     for entry in aid:
       if entry.kind != JObject:
         raise newException(ContagionError, "aid entry must be a JSON object")

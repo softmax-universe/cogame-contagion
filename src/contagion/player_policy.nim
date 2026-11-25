@@ -236,7 +236,7 @@ proc promptsFromView*(view: JsonNode, guidance: string, selection: PromptSelecti
     "\nReply with JSON. Required: lockdown (0..4) and testing (0..3). " &
     "Example: {\"lockdown\":0,\"testing\":2}. " &
     "Optional example: " & $optionalActions &
-    ". borders maps road names to levels 0..2. aid sends money to any other region. say and notes are optional strings."
+    ". borders maps road names to levels 0..2. aid sends money to other regions. The first three transfers use your available weekly budget. say and notes are optional strings."
 
 proc choosePromptAction*(client: LlmClient, view: JsonNode,
     guidance: string, slot: int, selection: PromptSelection): JsonNode =
