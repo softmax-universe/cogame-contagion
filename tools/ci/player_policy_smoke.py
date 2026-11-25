@@ -136,7 +136,7 @@ def main() -> None:
                         argv, env=env, stdout=handle, stderr=subprocess.STDOUT
                     )
                 )
-            assert game.wait(timeout=60) == 0
+            assert game.wait(timeout=60) == 0, (work / "game.log").read_text() + "\n" + "\n".join(f.read_text() for f in work.glob("player*.log"))
             for player in processes[1:]:
                 assert player.wait(timeout=10) == 0
             results = json.loads((work / "results.json").read_text())
@@ -231,6 +231,7 @@ def verify_negative_cases(game_bin: Path, player_bin: Path) -> None:
             assert not (work / "replay.json").exists(), "replay.json must not be fabricated on missing credentials"
             failure = json.loads((work / "player_failure.json").read_text())
             assert failure["failed_policy_index"] == 0
+            assert failure["kind"] == "episode_inconclusive"
             assert failure["message"]
         finally:
             for proc in procs:
@@ -300,6 +301,7 @@ def verify_negative_cases(game_bin: Path, player_bin: Path) -> None:
             assert not (work / "replay.json").exists(), "replay.json must not be fabricated on invalid action"
             failure = json.loads((work / "player_failure.json").read_text())
             assert failure["failed_policy_index"] == 0
+            assert failure["kind"] == "player_error"
             assert '"lockdown":9' in failure["message"]
             print("negative checks: missing credentials and invalid reply both failed explicitly without fallback")
         finally:

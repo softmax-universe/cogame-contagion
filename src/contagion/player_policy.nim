@@ -229,9 +229,11 @@ proc promptsFromView*(view: JsonNode, guidance: string, selection: PromptSelecti
   result.system = selection.systemBriefing(view["region"].getStr())
   result.user = "Private governor observation:\n" & $view &
     "\nOperator guidance:\n" & guidance &
-    "\nReply with only {\"lockdown\": 0, \"testing\": 2, " &
-    "\"borders\": {\"neighbour\": 0}, \"aid\": [], " &
-    "\"say\": \"\", \"notes\": \"\"}. Only name your three roads."
+    "\nReply with JSON. Required: lockdown (0..4) and testing (0..3). " &
+    "Example: {\"lockdown\":0,\"testing\":2}. " &
+    "Optional borders maps your road destinations to 0..2. Optional aid sends funds to other regions, e.g. " &
+    $(%*[{"to": view["own"]["gates"][0]["to"], "amount": 1}]) &
+    ". Optional say and notes are strings."
 
 proc choosePromptAction*(client: LlmClient, view: JsonNode,
     guidance: string, slot: int, selection: PromptSelection): JsonNode =

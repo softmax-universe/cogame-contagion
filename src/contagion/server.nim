@@ -211,7 +211,7 @@ proc finishEpisode(runtimeConfig: RuntimeConfig) =
   echo "contagion: episode complete, shutting down"
   quit(0)
 
-proc writePlayerFailure(slot: int, message: string): bool =
+proc writePlayerFailure(slot: int, message, kind: string): bool =
   ## Atomically publishes a typed GamePlayerFailure to COGAME_PLAYER_FAILURE_URI.
   let uri = getEnv("COGAME_PLAYER_FAILURE_URI").strip()
   if uri.len == 0:
@@ -219,7 +219,7 @@ proc writePlayerFailure(slot: int, message: string): bool =
   let trimmed = cleanText(message, 2000)
   let payload = $ %*{
     "message": (if trimmed.len > 0: trimmed else: "player slot " & $slot & " failed"),
-    "failed_policy_index": slot
+    "failed_policy_index": slot, "kind": kind
   }
   const FilePrefix = "file://"
   if uri.startsWith(FilePrefix):
@@ -234,7 +234,7 @@ proc writePlayerFailure(slot: int, message: string): bool =
     writeArtifact(uri, payload, "application/json", "COGAME_PLAYER_FAILURE_METHOD")
   true
 
-proc failEpisode(slot: int, message: string) =
+proc failEpisode(slot: int, message: string, kind = "episode_inconclusive") =
   ## Terminates the episode explicitly on a player failure without fabricating
   ## normal results or a replay.
   withLock stateLock:
@@ -242,7 +242,7 @@ proc failEpisode(slot: int, message: string) =
       return
     state.finished = true
   echo "contagion: terminal player failure (slot ", slot, "): ", message
-  let wroteFailure = writePlayerFailure(slot, message)
+  let wroteFailure = writePlayerFailure(slot, message, kind)
   sleep(200)
   quit(if wroteFailure: 0 else: 1)
 
@@ -365,24 +365,25 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
       var wasScripted = newSeq[bool](seats.len)
       var failedSeat = -1
       var failureReason = ""
+      var failureKind = "episode_inconclusive"
       withLock stateLock:
         for index, seat in seats:
           if state.pendingRejections.hasKey(seat):
             failedSeat = seat
             failureReason = state.pendingRejections[seat]
+            failureKind = "player_error"
             break
-          elif state.pendingDecisions.hasKey(seat):
+          if state.pendingDecisions.hasKey(seat):
             decisions[index] = state.pendingDecisions[seat]
             wasScripted[index] = state.pendingScripted[seat]
-          else:
+          elif failedSeat < 0 or not state.playerSockets.hasKey(seat):
             failedSeat = seat
             failureReason = "player slot " & $seat &
               " did not submit a decision for week " & $simCopy.week &
               " (disconnected or timed out)"
-            break
         state.pendingWeek = -1
       if failedSeat >= 0:
-        failEpisode(failedSeat, failureReason)
+        failEpisode(failedSeat, failureReason, failureKind)
 
       var applyFailedSeat = -1
       var applyFailureReason = ""
@@ -441,7 +442,7 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
                 "accepted": true, "execution_evidence": evidence
               })
       if applyFailedSeat >= 0:
-        failEpisode(applyFailedSeat, applyFailureReason)
+        failEpisode(applyFailedSeat, applyFailureReason, "player_error")
 
       ## Pace between weeks so spectators can read the map.
       if config.turnDelayMs > 0:
