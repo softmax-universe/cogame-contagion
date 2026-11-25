@@ -65,6 +65,9 @@ work_dir="$(mktemp -d "${TMPDIR:-/tmp}/${slug}-smoke.XXXXXX")"
 seats=0
 
 cleanup() {
+  if [ -n "${stub_pid:-}" ]; then
+    kill "${stub_pid}" >/dev/null 2>&1 || true
+  fi
   docker ps -aq --filter "name=${prefix}" | xargs -r docker rm -f >/dev/null 2>&1 || true
   docker network rm "${network}" >/dev/null 2>&1 || true
   rm -rf "${work_dir}"
@@ -164,7 +167,9 @@ for slot in range(seats):
     player_id = cert_players[slot].get("player_id") if slot < len(cert_players) else None
     entry = by_id.get(player_id) or {}
     env_args = []
-    for key, value in (entry.get("env") or {}).items():
+    entry_env = entry.get("env") or {}
+    uses_llm = str(entry_env.get("COWORLD_LLM_ENABLED", "")).lower() == "true"
+    for key, value in entry_env.items():
         env_args += ["-e", f"{key}={value}"]
     for kv in extra_env:
         env_args += ["-e", kv]
@@ -173,7 +178,9 @@ for slot in range(seats):
         fh.write(" ".join(shlex.quote(a) for a in env_args))
     with open(os.path.join(work, f"cmd-{slot}.args"), "w") as fh:
         fh.write(" ".join(shlex.quote(a) for a in argv))
-    print(f"slot {slot}: player_id={player_id or '(default)'} run={argv} env={len(env_args) // 2}")
+    with open(os.path.join(work, f"llm-{slot}"), "w") as fh:
+        fh.write("1" if uses_llm else "0")
+    print(f"slot {slot}: player_id={player_id or '(default)'} run={argv} env={len(env_args) // 2} llm={uses_llm}")
 
 with open(os.path.join(work, "seats"), "w") as fh:
     fh.write(str(seats))
@@ -182,6 +189,51 @@ PY
 
 seats="$(cat "${work_dir}/seats")"
 chmod 777 "${work_dir}"
+
+# --------------------------------------------------------------------------
+# Deterministic local HTTP model stub for declared LLM players.
+# --------------------------------------------------------------------------
+stub_log="${work_dir}/llm-stub.jsonl"
+stub_port_file="${work_dir}/llm-stub.port"
+python3 - "${stub_port_file}" "${stub_log}" <<'PY' &
+import json
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+port_file, log_file = sys.argv[1], sys.argv[2]
+
+class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        _ = self.rfile.read(length)
+        slot = self.headers.get("X-Coworld-Player-Slot", "")
+        with open(log_file, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"path": self.path, "slot": slot}) + "\n")
+        payload = {
+            "content": [{"type": "text", "text": '{"lockdown": 1, "testing": 2, "borders": {}, "aid": [], "say": "", "notes": ""}'}]
+        }
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args):
+        pass
+
+server = ThreadingHTTPServer(("0.0.0.0", 0), Handler)
+with open(port_file, "w", encoding="utf-8") as fh:
+    fh.write(str(server.server_port))
+server.serve_forever()
+PY
+stub_pid=$!
+for _ in $(seq 1 50); do
+  if [ -s "${stub_port_file}" ]; then break; fi
+  sleep 0.1
+done
+stub_port="$(cat "${stub_port_file}")"
+echo "deterministic LLM stub listening on port ${stub_port}"
 
 # --------------------------------------------------------------------------
 # Launch.
@@ -203,10 +255,14 @@ docker run -d --name "${prefix}-game" \
 for ((slot = 0; slot < seats; slot++)); do
   eval "penv=( $(cat "${work_dir}/env-${slot}.args") )"
   eval "pcmd=( $(cat "${work_dir}/cmd-${slot}.args") )"
-  if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-    penv+=(-e "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}")
+  uses_llm="$(cat "${work_dir}/llm-${slot}")"
+  extra_docker=()
+  if [ "${uses_llm}" = "1" ]; then
+    extra_docker+=(--add-host=host.docker.internal:host-gateway)
+    penv+=(-e "COWORLD_LLM_ENDPOINT=http://host.docker.internal:${stub_port}")
   fi
   docker run -d --name "${prefix}-p${slot}" --network "${network}" \
+    ${extra_docker[@]+"${extra_docker[@]}"} \
     -e COWORLD_PLAYER_WS_URL="ws://${prefix}-game:${port}/player?slot=${slot}&token=token-${slot}" \
     ${penv[@]+"${penv[@]}"} \
     "${image}" ${pcmd[@]+"${pcmd[@]}"} >/dev/null
@@ -283,9 +339,17 @@ if require_replay_json:
             "(set SMOKE_REQUIRE_REPLAY_JSON=0 for a binary replay format)"
         ) from exc
 
+stub_log = work / "llm-stub.jsonl"
+if not stub_log.exists():
+    raise SystemExit("deterministic LLM stub received 0 HTTP calls from contagion-player")
+calls = [json.loads(line) for line in stub_log.read_text().splitlines() if line.strip()]
+weeks = int(results.get("weeks", 0))
+if len(calls) < weeks:
+    raise SystemExit(f"expected >= {weeks} LLM HTTP calls, got {len(calls)}")
+
 print(
     f"smoke OK: seats={seats} results={results_path.stat().st_size}B "
-    f"replay={replay_path.stat().st_size}B reason={reason}"
+    f"replay={replay_path.stat().st_size}B llm_calls={len(calls)} reason={reason}"
 )
 PY
 then

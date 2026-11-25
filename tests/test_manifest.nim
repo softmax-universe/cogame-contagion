@@ -131,6 +131,8 @@ suite "the manifest":
     check not runnable.hasKey("env")
     doAssert manifest{"player"}[0]{"env"}{"ANTHROPIC_API_KEY_URI"}.isNil,
       "hosted LLM uses the platform sidecar without provider secrets"
+    check manifest["player"][0]["id"].getStr() == "contagion-player"
+    check manifest["player"][0]["env"]["COWORLD_LLM_ENABLED"].getStr() == "true"
     check manifest["game"]["name"].getStr() == "contagion"
     check not manifest["game"].hasKey("version")
     check manifest["tags"].len >= 3

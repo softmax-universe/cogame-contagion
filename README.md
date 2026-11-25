@@ -62,22 +62,22 @@ coworld upload-policy coworld-contagion:latest \
   --secret-env PLAYER_PROMPT="<your strategy>"
 ```
 
-The game sends each player a private `turn` observation. The player returns a complete action, and the game validates and resolves all six actions together. Missing or invalid actions use the `sentinel` fallback for that week.
+The game sends each player a private `turn` observation. The player returns a complete action, and the game validates and resolves all six actions together. Missing, disconnected, or invalid actions fail the episode explicitly instead of substituting a fallback move.
 
 An [ordinary player](players/ordinary/README.md) also uses that socket. It supports canned and trained-adapter
 backends. The game still owns hidden information, action validation, simultaneous resolution,
 results, and replay.
 
-Two scripted baselines ship in the same image, selected with `PLAYER_SCRIPTED`:
+Two scripted baselines ship in the same image, selected explicitly with `PLAYER_SCRIPTED`:
 
 - **`sentinel`** — the threshold dial policy: de-bias your own reported cases, step lockdown and
   testing at fixed prevalence thresholds, and gate each road against its neighbour's de-biased
-  estimate. Also the universal fallback move.
+  estimate.
 - **`laggard`** — the leaky neighbour: testing always 0 (so it under-reports by 6.7× and never
   isolates), gates always open, and lockdown 3 for exactly three weeks once its own blind estimate
   finally crosses 4%. Late, blind and expensive for everyone downwind.
 
-With no model credential, the bundled prompt player chooses `sentinel` from its private view. The game uses `sentinel` only when a seat misses its deadline.
+The bundled prompt player requires an LLM endpoint or credential (`COWORLD_LLM_ENDPOINT`, Bedrock, or `ANTHROPIC_API_KEY`) and fails explicitly when none is configured.
 
 ## Watching it
 

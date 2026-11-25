@@ -54,19 +54,21 @@ when isMainModule:
         " as governor of ", payload["name"].getStr()
     of "turn":
       let view = payload["view"]
-      let fallback = scripted != skNone or client.disabled
-      let action =
-        if fallback: scriptedActionFromView(view,
-          (if scripted == skNone: skSentinel else: scripted))
-        else: client.choosePromptAction(view, prompt, slot, promptSelection(payload["prompt_selection"]))
+      let (source, action) =
+        if scripted != skNone:
+          ("scripted", scriptedActionFromView(view, scripted))
+        else:
+          ("player", client.choosePromptAction(view, prompt, slot,
+            promptSelection(payload["prompt_selection"])))
       socket.send($ %*{
         "type": "decision", "week": payload["week"],
-        "source": (if fallback: "scripted" else: "player"),
+        "source": source,
         "action": action
       })
     of "decision_result":
       if not payload["accepted"].getBool():
-        raise newException(ValueError, "game rejected player action")
+        let reason = payload{"error"}.getStr("game rejected player action")
+        raise newException(ValueError, "game rejected player action: " & reason)
     of "final":
       echo "contagion player: final scores ", payload["scores"]
       break

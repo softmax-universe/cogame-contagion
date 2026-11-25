@@ -44,6 +44,7 @@ type
     pendingDecisions: Table[int, Decision]
     pendingProposals: Table[int, JsonNode]
     pendingScripted: Table[int, bool]
+    pendingRejections: Table[int, string]
     playerSockets: Table[int, WebSocket]
     socketSlots: Table[WebSocket, int]
     globalSockets: HashSet[WebSocket]
@@ -210,6 +211,41 @@ proc finishEpisode(runtimeConfig: RuntimeConfig) =
   echo "contagion: episode complete, shutting down"
   quit(0)
 
+proc writePlayerFailure(slot: int, message: string): bool =
+  ## Atomically publishes a typed GamePlayerFailure to COGAME_PLAYER_FAILURE_URI.
+  let uri = getEnv("COGAME_PLAYER_FAILURE_URI").strip()
+  if uri.len == 0:
+    return false
+  let trimmed = cleanText(message, 2000)
+  let payload = $ %*{
+    "message": (if trimmed.len > 0: trimmed else: "player slot " & $slot & " failed"),
+    "failed_policy_index": slot
+  }
+  const FilePrefix = "file://"
+  if uri.startsWith(FilePrefix):
+    let path = uri[FilePrefix.len .. ^1]
+    let dir = path.parentDir()
+    if dir.len > 0:
+      createDir(dir)
+    let tmpPath = path & ".tmp"
+    writeFile(tmpPath, payload)
+    moveFile(tmpPath, path)
+  else:
+    writeArtifact(uri, payload, "application/json", "COGAME_PLAYER_FAILURE_METHOD")
+  true
+
+proc failEpisode(slot: int, message: string) =
+  ## Terminates the episode explicitly on a player failure without fabricating
+  ## normal results or a replay.
+  withLock stateLock:
+    if state.finished:
+      return
+    state.finished = true
+  echo "contagion: terminal player failure (slot ", slot, "): ", message
+  let wroteFailure = writePlayerFailure(slot, message)
+  sleep(200)
+  quit(if wroteFailure: 0 else: 1)
+
 const PlayBudgetFraction* = 0.6
   ## Share of the platform's episode timeout spent playing. The rest covers
   ## container start, player connects, and writing the artifacts — the part
@@ -229,17 +265,20 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
         break
       sleep(200)
 
+    var missingSlot = -1
     withLock stateLock:
       state.started = true
-      var connected = newSeq[bool](config.players.len)
-      for slot in 0 ..< connected.len:
-        connected[slot] = state.playerSockets.hasKey(slot)
-      for slot in 0 ..< connected.len:
-        if not connected[slot]:
-          echo "contagion: slot ", slot, " never connected; sentinel fallback"
-      echo "contagion: starting with ", state.playerSockets.len, "/",
-        config.tokens.len, " players connected"
-      state.broadcastLocked()
+      for slot in 0 ..< config.players.len:
+        if not state.playerSockets.hasKey(slot):
+          missingSlot = slot
+          break
+      if missingSlot < 0:
+        echo "contagion: starting with ", state.playerSockets.len, "/",
+          config.tokens.len, " players connected"
+        state.broadcastLocked()
+    if missingSlot >= 0:
+      failEpisode(missingSlot,
+        "player slot " & $missingSlot & " failed to connect before timeout")
 
     ## The platform kills the episode at its timeout and keeps nothing. Play
     ## inside a fraction of it so results and the replay are written with room
@@ -284,15 +323,15 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
           " at ", (epochTime() - gameStart).int, "s"
 
       let decisionDeadline = epochTime() + config.turnBudgetSeconds.float
-      var waitingSeats = 0
+      var missingSeat = -1
       withLock stateLock:
         state.pendingWeek = simCopy.week
         state.pendingDecisions.clear()
         state.pendingProposals.clear()
         state.pendingScripted.clear()
+        state.pendingRejections.clear()
         for seat in seats:
           if state.playerSockets.hasKey(seat):
-            waitingSeats.inc
             state.playerSockets[seat].send($ %*{
               "type": "turn",
               "week": simCopy.week,
@@ -300,30 +339,53 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
                 "promptSeed": state.promptSelection.seed},
               "view": simCopy.playerViewJson(seat)
             })
+          else:
+            missingSeat = seat
+            break
+      if missingSeat >= 0:
+        failEpisode(missingSeat,
+          "player slot " & $missingSeat & " disconnected before week " & $simCopy.week)
       while epochTime() < decisionDeadline:
         var received = 0
+        var abortWait = false
         withLock stateLock:
-          for seat in seats:
-            if state.pendingDecisions.hasKey(seat):
-              received.inc
-        if received == waitingSeats:
+          if state.pendingRejections.len > 0:
+            abortWait = true
+          else:
+            for seat in seats:
+              if state.pendingDecisions.hasKey(seat):
+                received.inc
+              elif not state.playerSockets.hasKey(seat):
+                abortWait = true
+                break
+        if received == seats.len or abortWait:
           break
         sleep(20)
       var decisions = newSeq[Decision](seats.len)
       var wasScripted = newSeq[bool](seats.len)
-      var accepted = newSeq[bool](seats.len)
+      var failedSeat = -1
+      var failureReason = ""
       withLock stateLock:
         for index, seat in seats:
-          if state.pendingDecisions.hasKey(seat):
+          if state.pendingRejections.hasKey(seat):
+            failedSeat = seat
+            failureReason = state.pendingRejections[seat]
+            break
+          elif state.pendingDecisions.hasKey(seat):
             decisions[index] = state.pendingDecisions[seat]
             wasScripted[index] = state.pendingScripted[seat]
-            accepted[index] = true
           else:
-            echo "contagion: player seat ", seat, " using sentinel fallback"
-            decisions[index] = scriptedDecision(simCopy, seat, skSentinel)
-            wasScripted[index] = true
+            failedSeat = seat
+            failureReason = "player slot " & $seat &
+              " did not submit a decision for week " & $simCopy.week &
+              " (disconnected or timed out)"
+            break
         state.pendingWeek = -1
+      if failedSeat >= 0:
+        failEpisode(failedSeat, failureReason)
 
+      var applyFailedSeat = -1
+      var applyFailureReason = ""
       withLock stateLock:
         let firstEvent = state.sim.events.len
         for index, seat in seats:
@@ -341,41 +403,45 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
           try:
             state.sim.applyDecision(seat, decision, wasScripted[index])
           except ContagionError as error:
-            echo "contagion: reply rejected (", error.msg,
-              "); using the sentinel fallback"
-            ## From the PRE-BATCH snapshot, not the live sim: lower-index
-            ## seats have already latched this week, and the sentinel reads
-            ## neighbours' published testing levels. Generating the fallback
-            ## from the live sim would let it see a neighbour's week-w
-            ## decision, which no governor may (design.md:156-157).
-            let fallback = scriptedDecision(simCopy, seat, skSentinel)
-            state.sim.applyDecision(seat, fallback, true)
-            wasScripted[index] = true
-            accepted[index] = false
-        var executed: array[Seats, JsonNode]
-        for eventIndex in firstEvent ..< state.sim.events.len:
-          let event = state.sim.events[eventIndex]
-          if event.kind == evDial:
-            executed[event.seat] = decisionJson(state.sim, event.seat, event.decision)
-        state.broadcastLocked()
-        for index, seat in seats:
-          let proposal = if state.pendingProposals.hasKey(seat):
-            state.pendingProposals[seat] else: newJNull()
-          let evidence = %*{
-            "schema_version": 1, "event_type": "host_decision",
-            "slot": seat, "week": simCopy.week, "visibility": "private",
-            "prompt_selection": state.promptSelection.selectionMetadata(),
-            "submitted_action": proposal, "executed_action": executed[seat],
-            "accepted": accepted[index],
-            "proposal_unchanged": accepted[index] and proposal == executed[seat],
-            "source": (if not accepted[index]: "host-sentinel"
-              elif wasScripted[index]: "player-scripted" else: "player")
-          }
-          if state.playerSockets.hasKey(seat):
-            state.playerSockets[seat].send($ %*{
-              "type": "decision_result", "week": simCopy.week,
-              "accepted": accepted[index], "execution_evidence": evidence
-            })
+            let proposal = if state.pendingProposals.hasKey(seat):
+              $state.pendingProposals[seat] else: "null"
+            if state.playerSockets.hasKey(seat):
+              state.playerSockets[seat].send($ %*{
+                "type": "decision_result", "week": simCopy.week,
+                "accepted": false, "error": error.msg,
+                "submitted_raw": proposal
+              })
+            applyFailedSeat = seat
+            applyFailureReason = "player slot " & $seat &
+              " action rejected in week " & $simCopy.week & ": " &
+              error.msg & " | raw=" & cleanText(proposal, 400)
+            break
+        if applyFailedSeat < 0:
+          var executed: array[Seats, JsonNode]
+          for eventIndex in firstEvent ..< state.sim.events.len:
+            let event = state.sim.events[eventIndex]
+            if event.kind == evDial:
+              executed[event.seat] = decisionJson(state.sim, event.seat, event.decision)
+          state.broadcastLocked()
+          for index, seat in seats:
+            let proposal = if state.pendingProposals.hasKey(seat):
+              state.pendingProposals[seat] else: newJNull()
+            let evidence = %*{
+              "schema_version": 1, "event_type": "host_decision",
+              "slot": seat, "week": simCopy.week, "visibility": "private",
+              "prompt_selection": state.promptSelection.selectionMetadata(),
+              "submitted_action": proposal, "executed_action": executed[seat],
+              "accepted": true,
+              "proposal_unchanged": proposal == executed[seat],
+              "source": (if wasScripted[index]: "player-scripted" else: "player")
+            }
+            if state.playerSockets.hasKey(seat):
+              state.playerSockets[seat].send($ %*{
+                "type": "decision_result", "week": simCopy.week,
+                "accepted": true, "execution_evidence": evidence
+              })
+      if applyFailedSeat >= 0:
+        failEpisode(applyFailedSeat, applyFailureReason)
 
       ## Pace between weeks so spectators can read the map.
       if config.turnDelayMs > 0:
@@ -523,7 +589,24 @@ proc websocketHandler(
               state.pendingProposals[slot] = copy(action)
               state.pendingScripted[slot] = scripted
       except CatchableError as error:
-        echo "contagion: ignoring bad player frame: ", error.msg
+        echo "contagion: rejected player frame from slot ", slot, ": ", error.msg
+        var week = -1
+        withLock stateLock:
+          week = state.pendingWeek
+          if week >= 0 and not state.pendingRejections.hasKey(slot):
+            state.pendingRejections[slot] =
+              "player slot " & $slot & " submitted invalid action in week " &
+              $week & ": " & error.msg & " | raw=" & cleanText(message.data, 400)
+        try:
+          websocket.send($ %*{
+            "type": "decision_result",
+            "week": week,
+            "accepted": false,
+            "error": error.msg,
+            "submitted_raw": message.data
+          })
+        except CatchableError:
+          discard
     of ErrorEvent:
       discard
     of CloseEvent:
@@ -597,6 +680,8 @@ proc runGameServer*(config: GameConfig, runtimeConfig: RuntimeConfig,
   state.pendingWeek = -1
   state.pendingDecisions = initTable[int, Decision]()
   state.pendingProposals = initTable[int, JsonNode]()
+  state.pendingScripted = initTable[int, bool]()
+  state.pendingRejections = initTable[int, string]()
   runtimeConfigGlobal = runtimeConfig
 
   let router = buildRouter(replayMode = false)

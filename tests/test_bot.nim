@@ -140,16 +140,36 @@ suite "reply parsing":
       result.regions[pos].gdp = 1_000
     result.history[^1].regions = result.regions
 
-  test "dials are coerced from int, numeric string and float":
+  test "dials require strict integers and optional fields default cleanly":
     let sim = probe()
-    check parseDecision(sim, 0,
-      parseJson("""{"lockdown": 3, "testing": 2}""")).lockdown == 3
-    check parseDecision(sim, 0,
-      parseJson("""{"lockdown": "3", "testing": 2}""")).lockdown == 3
-    check parseDecision(sim, 0,
-      parseJson("""{"lockdown": 2.6, "testing": 2}""")).lockdown == 3
-    check parseDecision(sim, 0,
-      parseJson("""{"lockdown": " 1 ", "testing": "0"}""")).testing == 0
+    let minimal = parseDecision(sim, 0,
+      parseJson("""{"lockdown": 3, "testing": 2}"""))
+    check minimal.lockdown == 3
+    check minimal.testing == 2
+    check minimal.borders == [-1, -1, -1]
+    check minimal.aid.len == 0
+    check minimal.say == ""
+    check minimal.notes == ""
+    expect ContagionError:
+      discard parseDecision(sim, 0,
+        parseJson("""{"lockdown": "3", "testing": 2}"""))
+    expect ContagionError:
+      discard parseDecision(sim, 0,
+        parseJson("""{"lockdown": 2.6, "testing": 2}"""))
+
+  test "reply JSON parser accepts raw JSON and standard outer markdown fence":
+    let raw = parseReplyJson("""{"lockdown": 1, "testing": 2}""")
+    check raw["lockdown"].getInt() == 1
+    let fenced = parseReplyJson("```json\n{\"lockdown\": 2, \"testing\": 1}\n```")
+    check fenced["lockdown"].getInt() == 2
+    let plainFence = parseReplyJson("```\n{\"lockdown\": 0, \"testing\": 3}\n```")
+    check plainFence["testing"].getInt() == 3
+    expect ContagionError:
+      discard parseReplyJson("Here is my move: {\"lockdown\": 1, \"testing\": 2}")
+    expect ContagionError:
+      discard parseReplyJson("[1, 2, 3]")
+    expect ContagionError:
+      discard parseReplyJson("```python\n{\"lockdown\": 1, \"testing\": 2}\n```")
 
   test "out of range and unparseable dials are hard-invalid":
     let sim = probe()
@@ -177,32 +197,38 @@ suite "reply parsing":
       discard parseDecision(sim, 0, parseJson("""{"lockdown": 1,
         "testing": 1, "aid": {"to": "Riverbend"}}"""))
 
-  test "soft corrections are applied and marked":
+  test "invalid borders and aid targets or values are rejected":
     let sim = probe()
     let pos = sim.posOf[0]
     let mine = RegionNames[pos]
     let neighbour = RegionNames[neighbours(pos)[0]]
     let stranger = RegionNames[(pos + 2) mod Regions]   # not a neighbour
 
-    ## An unknown road is ignored, not fatal.
-    let unknown = parseDecision(sim, 0, parseJson(
-      """{"lockdown": 1, "testing": 1, "borders": {"Atlantis": 2}}"""))
-    check unknown.corrected
-    check unknown.borders == [-1, -1, -1]
+    ## An unknown road is rejected.
+    expect ContagionError:
+      discard parseDecision(sim, 0, parseJson(
+        """{"lockdown": 1, "testing": 1, "borders": {"Atlantis": 2}}"""))
 
-    ## A gate of 7 is clamped to 2.
-    let clamped = parseDecision(sim, 0, parseJson(
-      """{"lockdown": 1, "testing": 1, "borders": {"""" & neighbour &
-      """": 7}}"""))
-    check clamped.corrected
-    check clamped.borders[0] == 2
+    ## A non-adjacent real region in borders is rejected.
+    expect ContagionError:
+      discard parseDecision(sim, 0, parseJson(
+        """{"lockdown": 1, "testing": 1, "borders": {"""" & stranger &
+        """": 1}}"""))
 
-    ## Self aid is dropped, and so is aid to a region that is not on the map.
-    let selfAid = parseDecision(sim, 0, parseJson(
-      """{"lockdown": 1, "testing": 1, "aid": [{"to": """" & mine &
-      """", "amount": 50}, {"to": "Atlantis", "amount": 50}]}"""))
-    check selfAid.corrected
-    check selfAid.aid.len == 0
+    ## A gate of 7 is rejected instead of clamped.
+    expect ContagionError:
+      discard parseDecision(sim, 0, parseJson(
+        """{"lockdown": 1, "testing": 1, "borders": {"""" & neighbour &
+        """": 7}}"""))
+
+    ## Self aid and unknown region aid are rejected.
+    expect ContagionError:
+      discard parseDecision(sim, 0, parseJson(
+        """{"lockdown": 1, "testing": 1, "aid": [{"to": """" & mine &
+        """", "amount": 50}]}"""))
+    expect ContagionError:
+      discard parseDecision(sim, 0, parseJson(
+        """{"lockdown": 1, "testing": 1, "aid": [{"to": "Atlantis", "amount": 50}]}"""))
 
     ## Aid to a real, distant region is fine — the graph does not bound it.
     let far = parseDecision(sim, 0, parseJson(
@@ -211,12 +237,11 @@ suite "reply parsing":
     check far.aid.len == 1
     check far.aid[0].to == positionOfName(stranger)
 
-    ## A negative amount is dropped.
-    let negative = parseDecision(sim, 0, parseJson(
-      """{"lockdown": 1, "testing": 1, "aid": [{"to": """" & neighbour &
-      """", "amount": -5}]}"""))
-    check negative.corrected
-    check negative.aid.len == 0
+    ## A negative amount is rejected.
+    expect ContagionError:
+      discard parseDecision(sim, 0, parseJson(
+        """{"lockdown": 1, "testing": 1, "aid": [{"to": """" & neighbour &
+        """", "amount": -5}]}"""))
 
   test "free text is truncated on rune boundaries":
     let sim = probe()
@@ -242,7 +267,7 @@ suite "reply parsing":
     let neighbour = RegionNames[neighbours(pos)[1]]
     let decision = parseDecision(sim, 0, %*{
       "lockdown": 4, "testing": 3,
-      "borders": {neighbour: 9},
+      "borders": {neighbour: 2},
       "aid": [{"to": neighbour, "amount": 100000}],
       "say": "sealing the north road",
       "notes": "keep an eye on the ledger"})
@@ -251,14 +276,13 @@ suite "reply parsing":
     check sim.regions[pos].gates[1] == 2
     check sim.pendingDecision[pos].aid[0].amount == MaxAidPerWeek
 
-  test "PLAYER_SCRIPTED values map to the two baselines":
-    check parseScriptKind("1") == skSentinel
-    check parseScriptKind("true") == skSentinel
-    check parseScriptKind("yes") == skSentinel
+  test "PLAYER_SCRIPTED accepts only canonical baseline names or empty":
     check parseScriptKind("sentinel") == skSentinel
     check parseScriptKind(" LAGGARD ") == skLaggard
     check parseScriptKind("") == skNone
-    check parseScriptKind("something else") == skNone
+    for bad in ["1", "true", "yes", "leaky", "something else"]:
+      expect ValueError:
+        discard parseScriptKind(bad)
 
   test "both player baselines match the rules from private views":
     for seed in [1, 7, 42, 1234]:
