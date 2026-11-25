@@ -197,6 +197,19 @@ suite "reply parsing":
       discard parseDecision(sim, 0, parseJson("""{"lockdown": 1,
         "testing": 1, "aid": {"to": "Riverbend"}}"""))
 
+  test "a fourth aid proposal uses the ordinary weekly settlement rule":
+    var sim = probe()
+    let pos = sim.posOf[0]
+    var aid = newJArray()
+    for other in 0 ..< Regions:
+      if other != pos:
+        aid.add(%*{"to": RegionNames[other], "amount": 1})
+    let proposal = sim.parseDecision(0, %*{"lockdown": 0, "testing": 2, "aid": aid})
+    check proposal.aid.len == Regions - 1
+    sim.applyDecision(0, proposal, false)
+    check sim.pendingDecision[pos].aid.len == MaxAidEntries
+    check sim.pendingDecision[pos].corrected
+
   test "invalid borders and aid targets or values are rejected":
     let sim = probe()
     let pos = sim.posOf[0]
