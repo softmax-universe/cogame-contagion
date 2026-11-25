@@ -58,8 +58,16 @@ when isMainModule:
         if scripted != skNone:
           ("scripted", scriptedActionFromView(view, scripted))
         else:
-          ("player", client.choosePromptAction(view, prompt, slot,
-            promptSelection(payload["prompt_selection"])))
+          let reply = client.generatePromptReply(view, prompt, slot,
+            promptSelection(payload["prompt_selection"]))
+          var proposal: JsonNode
+          try:
+            proposal = parseReplyJson(reply)
+          except CatchableError as error:
+            socket.send($ %*{"type": "decision_error", "week": payload["week"],
+              "error": error.msg})
+            continue
+          ("player", proposal)
       socket.send($ %*{
         "type": "decision", "week": payload["week"],
         "source": source,
