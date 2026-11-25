@@ -80,7 +80,7 @@ when isMainModule:
       response = %*{"response": $decisionJson(game, seat, teacher)}
     of "step":
       doAssert not game.done and request["decision_id"].getInt() == id
-      let parsed = parseDecision(game, seat, parseJson(request["response"].getStr()))
+      let parsed = parseDecision(game, seat, parseReplyJson(request["response"].getStr()))
       let executed = decisionJson(game, seat, parsed)
       queued[seat] = parsed
       inc id

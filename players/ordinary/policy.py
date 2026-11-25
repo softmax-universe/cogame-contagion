@@ -70,6 +70,25 @@ def prompt_metadata(selection: dict, system: str, user: str) -> dict:
             "user_sha256": hashlib.sha256(user.encode()).hexdigest()}
 
 
+def parse_reply_json(text: str) -> dict:
+    """Parse a raw JSON object or a single standard outer Markdown JSON fence."""
+    body = text.strip()
+    if body.startswith("```"):
+        nl = body.find("\n")
+        if nl < 0 or not body.endswith("```"):
+            raise ValueError("unterminated markdown code fence")
+        lang = body[3:nl].strip().lower()
+        if lang and lang != "json":
+            raise ValueError(f"unsupported markdown code fence language: {lang}")
+        body = body[nl + 1 : -3].strip()
+    if not body:
+        raise ValueError("empty action reply")
+    action = json.loads(body)
+    if not isinstance(action, dict):
+        raise ValueError("action reply must be a JSON object")
+    return action
+
+
 def prompts(view: dict, guidance: str, selection: dict) -> tuple[str, str]:
     variant = selected_variant(selection)
     system = (PROMPT_BANK["introductions"][variant] + PROMPT_BANK["rules"][variant]).format(region=view["region"])

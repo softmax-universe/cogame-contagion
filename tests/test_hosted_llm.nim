@@ -16,3 +16,16 @@ block:
     doAssert not body.hasKey("anthropic_version")
     doAssert not body.hasKey("output_config")
   echo "hosted sidecar routing and seat attribution passed"
+
+block:
+  for key in ["COWORLD_LLM_ENDPOINT", "COWORLD_LLM_MODEL",
+      "AWS_ENDPOINT_URL_BEDROCK_RUNTIME", "AWS_BEARER_TOKEN_BEDROCK",
+      "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY_URI"]:
+    delEnv(key)
+  var raised = false
+  try:
+    discard newLlmClient("claude-haiku-4-5-20251001", 128, 5)
+  except ContagionError:
+    raised = true
+  doAssert raised, "missing LLM credentials must raise instead of falling back"
+  echo "missing LLM credentials explicit failure passed"

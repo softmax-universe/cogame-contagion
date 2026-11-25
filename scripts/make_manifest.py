@@ -147,7 +147,7 @@ any other governor's decision for the current week.
 
 ## Replies
 
-One JSON object and nothing else, beginning with `{`:
+One JSON object (raw JSON or wrapped in a single ```json ... ``` Markdown fence):
 
     {"lockdown": 3, "testing": 2,
      "borders": {"Kestrel Flats": 2, "Ash Hollow": 0},
@@ -155,12 +155,13 @@ One JSON object and nothing else, beginning with `{`:
      "say": "holding L3 two more weeks if the money keeps coming",
      "notes": "Ash Hollow reported 400 at testing 0 = ~2700 real. Paid them 120."}
 
-`lockdown` (0..4) and `testing` (0..3) are required; an int, a numeric string or a float are all
-accepted, and anything out of range is invalid. `borders` names at most your own three roads and
-any road you leave out keeps its current gate; an unknown road is ignored and a gate outside 0..2 is
-clamped. `aid` is at most 3 entries of {"to", "amount"}; self or unknown recipients are dropped and
-amounts are clamped to your ledger. `say` is at most 160 runes and `notes` at most 700; both are cut
-on rune boundaries. An invalid reply is retried once and then falls back to the sentinel move.
+`lockdown` (integer 0..4) and `testing` (integer 0..3) are required. `borders` is optional and names
+only your own three adjacent roads with integer gates 0..2; any road you omit keeps its current
+gate. `aid` is optional and holds at most 3 entries of {"to", "amount"} targeting other regions with
+nonnegative integer amounts (settled amounts are clamped to your ledger and 200/week). `say` (at
+most 160 runes) and `notes` (at most 700 runes) are optional strings cut on rune boundaries.
+Missing, malformed, or invalid actions are rejected and end the episode with an explicit player
+failure rather than substituting a fallback move.
 
 ## Scoring and endings
 
@@ -462,13 +463,13 @@ MANIFEST = {
         player_runnable(
             "contagion-player",
             "Contagion Prompt Player",
-            "The reference Contagion policy: reads its private view, uses PLAYER_PROMPT (or a default strategy) to choose and submit an action. Field your own policy with a different PLAYER_PROMPT.",
-            {},
+            "The reference Contagion policy: reads its private view, uses PLAYER_PROMPT (or a default strategy) to call the configured LLM endpoint and submit an action. Field your own policy with a different PLAYER_PROMPT.",
+            {"COWORLD_LLM_ENABLED": "true"},
         ),
         player_runnable(
             "contagion-sentinel",
             "Contagion Sentinel Baseline",
-            "The scripted threshold baseline as a fieldable player policy: de-bias reported cases, set dials and gates, never talk or send aid. The game uses the same public rules only for missing-action fallback.",
+            "The scripted threshold baseline as a fieldable player policy: de-bias reported cases, set dials and gates, never talk or send aid.",
             {"PLAYER_SCRIPTED": "sentinel"},
         ),
         player_runnable(
@@ -519,11 +520,10 @@ MANIFEST = {
             "turnDelayMs": 0,
             "player_connect_timeout_seconds": 180,
         },
-        # Six seats, all scripted, no LLM, sub-second. contagion-player takes a
-        # slot because `coworld certify`'s players-run check fails any declared
-        # player that never occupies one (coworld 0.1.42,
-        # certifier.validate_players_ran); with no credentials it plays the
-        # sentinel move, so the effective mix is still 3 sentinel / 3 laggard.
+        # Six seats: one ordinary model player (`contagion-player`, which calls
+        # COWORLD_LLM_ENDPOINT) against five explicit scripted baseline
+        # opponents (2 sentinel, 3 laggard). Every declared player occupies a
+        # certification slot.
         "players": [
             {"player_id": "contagion-player"},
             {"player_id": "contagion-sentinel"},

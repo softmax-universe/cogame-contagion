@@ -11,7 +11,7 @@ const
 
 type
   LlmTransport = enum
-    ltNone, ltSidecar, ltBedrock, ltAnthropic
+    ltSidecar, ltBedrock, ltAnthropic
 
   LlmClient* = ref object
     curl: Curly
@@ -25,7 +25,6 @@ type
     model: string
     maxOutputTokens: int
     timeoutSeconds: int
-    disabled*: bool   ## true once credentials are known-unavailable
 
 proc resolveApiKey(): string =
   result = getEnv("ANTHROPIC_API_KEY").strip()
@@ -103,9 +102,8 @@ proc newLlmClient*(model: string, maxOutputTokens, timeoutSeconds: int): LlmClie
     result.curl = newCurly()
     echo "contagion llm: anthropic transport, model ", result.model
   else:
-    result.transport = ltNone
-    result.disabled = true
-    echo "contagion llm: no LLM credentials; using scripted fallback"
+    raise newException(ContagionError,
+      "no LLM endpoint or credentials configured (set COWORLD_LLM_ENDPOINT, Bedrock env, or ANTHROPIC_API_KEY)")
 
 proc requestFor(client: LlmClient, system, user: string, slot: int):
     tuple[url: string, headers: HttpHeaders, body: string] =
@@ -151,7 +149,6 @@ proc textOf(client: LlmClient, response: Response, error, url: string):
         client.tryNextBedrockModel("no model access"):
       raise newException(ContagionError,
         "bedrock model access denied: " & detail)
-    client.disabled = true
     raise newException(ContagionError,
       "llm auth failed (" & $response.code & ") at " & url & ": " & detail)
   if response.code == 429:
@@ -245,8 +242,4 @@ proc choosePromptAction*(client: LlmClient, view: JsonNode,
   let responses = client.curl.makeRequests(batch, client.timeoutSeconds)
   let reply = client.textOf(responses[0].response,
     responses[0].error, request.url)
-  let first = reply.find('{')
-  let last = reply.rfind('}')
-  if first < 0 or last <= first:
-    raise newException(ContagionError, "no JSON action in response")
-  parseJson(reply[first .. last])
+  parseReplyJson(reply)

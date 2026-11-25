@@ -1,7 +1,7 @@
 ## Contagion action parsing and timeout fallback. Game and players share
 ## public rules; model transport and prompting live in the player process.
 
-import std/[json, math, strutils, unicode]
+import std/[json, strutils, unicode]
 import sim
 
 type
@@ -11,12 +11,16 @@ type
     skLaggard = "laggard"
 
 proc parseScriptKind*(text: string): ScriptKind =
-  ## PLAYER_SCRIPTED values: "1"/"true"/"yes"/"sentinel" play the threshold
-  ## dial policy, "laggard" the leaky neighbour, anything else nothing.
-  case text.strip().toLowerAscii()
-  of "1", "true", "yes", "sentinel": skSentinel
-  of "laggard", "leaky": skLaggard
-  else: skNone
+  ## PLAYER_SCRIPTED values: empty selects the ordinary model player;
+  ## "sentinel" or "laggard" selects an explicit scripted baseline.
+  let cleaned = text.strip().toLowerAscii()
+  case cleaned
+  of "": skNone
+  of "sentinel": skSentinel
+  of "laggard": skLaggard
+  else:
+    raise newException(ValueError,
+      "unknown PLAYER_SCRIPTED value: " & text & " (expected sentinel or laggard)")
 
 # ---- Scripted baselines -----------------------------------------------------
 #
@@ -125,49 +129,64 @@ proc cleanText*(text: string, limit: int): string =
     return
   result = result.runeSubStr(0, limit - 1) & "…"
 
-proc coerceDial(node: JsonNode, name: string, lo, hi: int): int =
-  ## An int, a numeric string, or a float (rounded). Out of range or
-  ## unparseable is HARD-INVALID.
+proc parseReplyJson*(reply: string): JsonNode =
+  ## Parses a raw JSON object or a single standard outer Markdown JSON fence.
+  var body = reply.strip()
+  if body.startsWith("```"):
+    let nl = body.find('\n')
+    if nl < 0 or not body.endsWith("```"):
+      raise newException(ContagionError, "unterminated markdown code fence")
+    let fenceLang = body[3 ..< nl].strip().toLowerAscii()
+    if fenceLang.len > 0 and fenceLang != "json":
+      raise newException(ContagionError,
+        "unsupported markdown code fence language: " & fenceLang)
+    body = body[nl + 1 ..< body.len - 3].strip()
+  if body.len == 0:
+    raise newException(ContagionError, "empty action reply")
+  try:
+    result = parseJson(body)
+  except CatchableError as error:
+    raise newException(ContagionError, "invalid JSON action: " & error.msg)
+  if result.kind != JObject:
+    raise newException(ContagionError, "action reply must be a JSON object")
+
+proc parseDialInt(node: JsonNode, name: string, lo, hi: int): int =
+  ## Strict integer dial parser. Missing, non-integer, or out-of-range raises.
   if node.isNil or node.kind == JNull:
     raise newException(ContagionError, "no " & name & " in response")
-  var value = -1
-  case node.kind
-  of JInt:
-    value = node.getInt()
-  of JFloat:
-    value = int(round(node.getFloat()))
-  of JString:
-    let text = node.getStr().strip()
-    try:
-      value = int(round(parseFloat(text)))
-    except ValueError:
-      raise newException(ContagionError, name & " is not a number: " & text)
-  else:
-    raise newException(ContagionError, name & " must be a number: " & $node)
+  if node.kind != JInt:
+    raise newException(ContagionError, name & " must be an integer: " & $node)
+  let value = node.getInt()
   if value < lo or value > hi:
     raise newException(ContagionError,
       name & " must be " & $lo & ".." & $hi & ": " & $value)
   value
 
 proc parseDecision*(sim: Sim, seat: int, payload: JsonNode): Decision =
-  ## Tolerant by design. HARD-INVALID (raises, so the seat is retried once and
-  ## then falls back): a missing or out-of-range lockdown or testing, a
-  ## `borders` that is not an object, an `aid` that is not an array. SOFT
-  ## CORRECTIONS (applied and marked `corrected`): an unknown road, a gate
-  ## outside 0..2, a self or unknown aid recipient, a bad amount, entries past
-  ## the third.
+  ## Strict canonical decision parser. Optional fields (`borders`, `aid`, `say`,
+  ## `notes`) default cleanly; invalid fields or out-of-range values raise
+  ## ContagionError instead of being silently corrected.
+  if payload.isNil or payload.kind != JObject:
+    raise newException(ContagionError, "decision action must be a JSON object")
   let pos = sim.posOf[seat]
   result = blankDecision()
-  result.notes = cleanText(payload{"notes"}.getStr(), MaxNotesLen)
-  result.say = cleanText(payload{"say"}.getStr(), MaxSayLen).replace("\n", " ")
-  result.lockdown = coerceDial(payload{"lockdown"}, "lockdown", 0, 4)
-  result.testing = coerceDial(payload{"testing"}, "testing", 0, 3)
+  let notesNode = payload{"notes"}
+  if not (notesNode.isNil or notesNode.kind == JNull):
+    if notesNode.kind != JString:
+      raise newException(ContagionError, "notes must be a string")
+    result.notes = cleanText(notesNode.getStr(), MaxNotesLen)
+  let sayNode = payload{"say"}
+  if not (sayNode.isNil or sayNode.kind == JNull):
+    if sayNode.kind != JString:
+      raise newException(ContagionError, "say must be a string")
+    result.say = cleanText(sayNode.getStr(), MaxSayLen).replace("\n", " ")
+  result.lockdown = parseDialInt(payload{"lockdown"}, "lockdown", 0, 4)
+  result.testing = parseDialInt(payload{"testing"}, "testing", 0, 3)
 
   let borders = payload{"borders"}
   if not (borders.isNil or borders.kind == JNull):
     if borders.kind != JObject:
       raise newException(ContagionError, "borders must be a JSON object")
-    var named = 0
     for key, value in borders:
       let far = positionOfName(key)
       var slot = -1
@@ -176,67 +195,33 @@ proc parseDecision*(sim: Sim, seat: int, payload: JsonNode): Decision =
           if otherEnd(NeighboursOf[pos][candidate], pos) == far:
             slot = candidate
       if slot < 0:
-        ## Not one of this region's three roads: ignored, not fatal.
-        result.corrected = true
-        continue
-      inc named
-      if named > Degree:
-        result.corrected = true
-        continue
-      var gate = 0
-      try:
-        gate = coerceDial(value, "gate", -1_000_000, 1_000_000)
-      except ContagionError:
-        result.corrected = true
-        continue
-      if gate < 0:
-        gate = 0
-        result.corrected = true
-      elif gate > 2:
-        gate = 2
-        result.corrected = true
-      result.borders[slot] = gate
+        raise newException(ContagionError,
+          "unknown or non-adjacent border road: " & key)
+      result.borders[slot] = parseDialInt(value, "gate", 0, 2)
 
   let aid = payload{"aid"}
   if not (aid.isNil or aid.kind == JNull):
     if aid.kind != JArray:
       raise newException(ContagionError, "aid must be a JSON array")
+    if aid.len > MaxAidEntries:
+      raise newException(ContagionError,
+        "aid may contain at most " & $MaxAidEntries & " entries")
     for entry in aid:
-      if result.aid.len >= MaxAidEntries:
-        result.corrected = true
-        break
       if entry.kind != JObject:
-        result.corrected = true
-        continue
-      var name = entry{"to"}.getStr()
-      if name.runeLen > 24:
-        name = name.runeSubStr(0, 24)
+        raise newException(ContagionError, "aid entry must be a JSON object")
+      let toNode = entry{"to"}
+      if toNode.isNil or toNode.kind != JString:
+        raise newException(ContagionError, "aid.to must be a region name string")
+      let name = toNode.getStr()
       let far = positionOfName(name)
       if far < 0 or far == pos:
-        result.corrected = true
-        continue
+        raise newException(ContagionError, "invalid aid recipient: " & name)
       let amountNode = entry{"amount"}
-      var amount = 0'i64
-      if amountNode.isNil or amountNode.kind == JNull:
-        result.corrected = true
-        continue
-      case amountNode.kind
-      of JInt:
-        amount = amountNode.getBiggestInt()
-      of JFloat:
-        amount = int64(round(amountNode.getFloat()))
-      of JString:
-        try:
-          amount = int64(round(parseFloat(amountNode.getStr().strip())))
-        except ValueError:
-          result.corrected = true
-          continue
-      else:
-        result.corrected = true
-        continue
+      if amountNode.isNil or amountNode.kind != JInt:
+        raise newException(ContagionError, "aid.amount must be an integer")
+      let amount = amountNode.getBiggestInt()
       if amount < 0:
-        result.corrected = true
-        continue
+        raise newException(ContagionError, "aid.amount must be nonnegative")
       if amount == 0:
         continue
       result.aid.add(AidEntry(to: far, amount: amount))

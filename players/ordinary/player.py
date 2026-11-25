@@ -8,7 +8,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import websocket
 from capture import Capture
-from policy import candidates, prompt_metadata, prompts
+from policy import candidates, parse_reply_json, prompt_metadata, prompts
 
 
 def choose(turn: dict, generator) -> tuple[dict, str, str | None]:
@@ -18,9 +18,7 @@ def choose(turn: dict, generator) -> tuple[dict, str, str | None]:
             {"role": "system", "content": turn["system"]},
             {"role": "user", "content": turn["user"]},
         ])
-        action = json.loads(completion)
-        if not isinstance(action, dict):
-            raise ValueError("trained Contagion decision must be a JSON object")
+        action = parse_reply_json(completion)
         return action, "trained", completion
     return candidates[0]["action"], "canned", None
 
@@ -60,6 +58,10 @@ def main() -> None:
                                     "action": action, "source": source}))
         elif kind == "decision_result":
             turn, action, source, response = pending.pop(frame["week"])
+            if not frame.get("accepted"):
+                raise RuntimeError(
+                    f"Contagion rejected player action: {frame.get('error', 'rejected')}"
+                )
             if artifact:
                 artifact.record(turn["system"], turn["user"], action, source,
                                 frame["week"], turn["prompt_template"], frame["execution_evidence"], response)
