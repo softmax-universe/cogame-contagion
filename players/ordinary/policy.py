@@ -93,7 +93,7 @@ def prompts(view: dict, guidance: str, selection: dict) -> tuple[str, str]:
     variant = selected_variant(selection)
     system = (PROMPT_BANK["introductions"][variant] + PROMPT_BANK["rules"][variant]).format(region=view["region"])
     road = view["own"]["gates"][0]["to"]
-    optional_actions = {"borders": {road: 1}, "aid": [{"to": road, "amount": 1}]}
+    optional_actions = {"borders": {g["to"]: g["gate"] for g in view["own"]["gates"]}, "aid": [{"to": road, "amount": 1}]}
     user = (
         "Private governor observation:\n"
         + json.dumps(view, ensure_ascii=False, separators=(",", ":"))
@@ -103,6 +103,6 @@ def prompts(view: dict, guidance: str, selection: dict) -> tuple[str, str]:
         'Example: {"lockdown":0,"testing":2}. '
         'Optional example: '
         + json.dumps(optional_actions, ensure_ascii=False, separators=(",", ":"))
-        + ". borders maps road names to levels 0..2. aid sends money to other regions. The first three transfers use your available weekly budget. say and notes are optional strings."
+        + ". Those are your only border roads. Set any of them to a level 0..2. aid sends money to other regions. The first three transfers use your available weekly budget. say and notes are optional strings."
     )
     return system, user
