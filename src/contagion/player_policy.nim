@@ -239,13 +239,11 @@ proc promptsFromView*(view: JsonNode, guidance: string, selection: PromptSelecti
     "Optional example: " & $optionalActions &
     ". Those are your only border roads. Set any of them to a level 0..2. aid sends money to other regions. The first three transfers use your available weekly budget. say and notes are optional strings."
 
-proc choosePromptAction*(client: LlmClient, view: JsonNode,
-    guidance: string, slot: int, selection: PromptSelection): JsonNode =
+proc generatePromptReply*(client: LlmClient, view: JsonNode,
+    guidance: string, slot: int, selection: PromptSelection): string =
   let (system, user) = promptsFromView(view, guidance, selection)
   let request = client.requestFor(system, user, slot)
   var batch: RequestBatch
   batch.post(request.url, request.headers, request.body, "seat")
   let responses = client.curl.makeRequests(batch, client.timeoutSeconds)
-  let reply = client.textOf(responses[0].response,
-    responses[0].error, request.url)
-  parseReplyJson(reply)
+  client.textOf(responses[0].response, responses[0].error, request.url)

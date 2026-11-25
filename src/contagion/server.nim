@@ -573,7 +573,14 @@ proc websocketHandler(
         return
       try:
         let payload = parseJson(message.data)
-        if payload{"type"}.getStr() == "decision":
+        if payload{"type"}.getStr() == "decision_error":
+          withLock stateLock:
+            if state.pendingWeek >= 0 and payload{"week"}.getInt(-1) == state.pendingWeek and
+                not state.pendingDecisions.hasKey(slot):
+              state.pendingRejections[slot] = "player slot " & $slot &
+                " could not decode its action in week " & $state.pendingWeek & ": " &
+                cleanText(payload{"error"}.getStr(), 300)
+        elif payload{"type"}.getStr() == "decision":
           let week = payload["week"].getInt()
           let action = payload["action"]
           if action.kind != JObject:

@@ -239,11 +239,15 @@ def verify_negative_cases(game_bin: Path, player_bin: Path) -> None:
                     proc.terminate()
                     proc.wait(timeout=5)
 
-    # Case 2: invalid model reply (out-of-range lockdown) -> rejected, raw preserved, no results.json
+    verify_invalid_reply(game_bin, player_bin, '{"lockdown":9,"testing":2,"borders":{},"aid":[],"say":"bad","notes":""}', '"lockdown":9')
+    verify_invalid_reply(game_bin, player_bin, '```json\n{"lockdown": 1', "unterminated markdown code fence")
+
+
+def verify_invalid_reply(game_bin: Path, player_bin: Path, reply: str, expected_error: str) -> None:
     class BadModelStub(BaseHTTPRequestHandler):
         def do_POST(self) -> None:
             _ = self.rfile.read(int(self.headers["Content-Length"]))
-            payload = {"content": [{"type": "text", "text": '{"lockdown":9,"testing":2,"borders":{},"aid":[],"say":"bad","notes":""}'}]}
+            payload = {"content": [{"type": "text", "text": reply}]}
             data = json.dumps(payload).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -302,8 +306,8 @@ def verify_negative_cases(game_bin: Path, player_bin: Path) -> None:
             failure = json.loads((work / "player_failure.json").read_text())
             assert failure["failed_policy_index"] == 0
             assert failure["kind"] == "player_error"
-            assert '"lockdown":9' in failure["message"]
-            print("negative checks: missing credentials and invalid reply both failed explicitly without fallback")
+            assert expected_error in failure["message"], failure
+            print("invalid reply attributed to the player:", expected_error)
         finally:
             for proc in procs:
                 if proc.poll() is None:
